@@ -351,5 +351,9 @@ def run() -> None:
     if modules.globals.headless:
         start()
     else:
+        if sys.platform.startswith('linux') and not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY'):
+            print("[DLC.CORE] Error: No display detected (e.g., running in Google Colab or headless server).")
+            print("Please run in headless mode by providing -s (source), -t (target), and -o (output) arguments.")
+            sys.exit(1)
         window = ui.init(start, destroy, modules.globals.lang)
         window.mainloop()

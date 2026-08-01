@@ -3,6 +3,10 @@
 import os
 import sys
 
+# Set offscreen platform for headless environments (like Google Colab) to prevent Qt plugin crashes on import
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 # Add the project root to PATH so bundled ffmpeg/ffprobe are found
 project_root = os.path.dirname(os.path.abspath(__file__))
 os.environ["PATH"] = project_root + os.pathsep + os.environ.get("PATH", "")

@@ -11,7 +11,7 @@ if platform.system() == "Windows":
 
 
 class VideoCapturer:
-    def __init__(self, device_index: int):
+    def __init__(self, device_index):
         self.device_index = device_index
         self.frame_callback = None
         self._current_frame = None
@@ -23,8 +23,8 @@ class VideoCapturer:
         self.actual_height: int = 0
         self.actual_fps: float = 0.0
 
-        # Initialize Windows-specific components if on Windows
-        if platform.system() == "Windows":
+        # Initialize Windows-specific components if on Windows and using webcam
+        if platform.system() == "Windows" and isinstance(self.device_index, int):
             self.graph = FilterGraph()
             # Verify device exists
             devices = self.graph.get_input_devices()
@@ -36,7 +36,7 @@ class VideoCapturer:
     def start(self, width: int = 960, height: int = 540, fps: int = 60) -> bool:
         """Initialize and start video capture"""
         try:
-            if platform.system() == "Windows":
+            if platform.system() == "Windows" and isinstance(self.device_index, int):
                 # device_index comes from pygrabber.FilterGraph (DirectShow
                 # enumeration), so open with DSHOW first to preserve mapping.
                 # MSMF and DirectShow enumerate cameras in different orders, so
@@ -81,7 +81,7 @@ class VideoCapturer:
             # Belt-and-braces: also set via cap.set() for backends that honor
             # post-open changes (MSMF, V4L2). DSHOW ignores these, but the
             # construction params above already handled it.
-            if platform.system() != "Windows":
+            if isinstance(self.device_index, int) and platform.system() != "Windows":
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
@@ -92,11 +92,13 @@ class VideoCapturer:
             self.actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             # CAP_PROP_FPS is unreliable on DirectShow — often reports 30
-            # even when the camera delivers 60.  Measure empirically by
-            # timing a burst of frames.
+            # even when the camera delivers 60. Measure empirically for webcams.
             reported_fps = self.cap.get(cv2.CAP_PROP_FPS)
-            self.actual_fps = self._measure_fps(warmup=10, sample=30,
-                                                fallback=reported_fps or fps)
+            if isinstance(self.device_index, int):
+                self.actual_fps = self._measure_fps(warmup=10, sample=30,
+                                                    fallback=reported_fps or fps)
+            else:
+                self.actual_fps = reported_fps or fps
 
             print(f"[VideoCapturer] {self.actual_width}x{self.actual_height} "
                   f"@ {self.actual_fps:.1f}fps (reported={reported_fps:.0f})",

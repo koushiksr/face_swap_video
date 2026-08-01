@@ -697,21 +697,23 @@ class MainWindow(QMainWindow):
     # ── camera card ──────────────────────────────────────────────────────
 
     def _build_camera_card(self) -> QGroupBox:
-        card = QGroupBox(_("Camera"))
+        card = QGroupBox(_("Camera / Video Input"))
         layout = QHBoxLayout(card)
 
-        layout.addWidget(QLabel(_("Select Camera:")))
+        layout.addWidget(QLabel(_("Select Input:")))
         self._camera_indices, self._camera_names = get_available_cameras()
 
         self.cb_camera = QComboBox()
         if not self._camera_names or self._camera_names[0] == "No cameras found":
-            self.cb_camera.addItem("No cameras found")
-            self.cb_camera.setEnabled(False)
-            cam_ok = False
-        else:
-            self.cb_camera.addItems(self._camera_names)
-            cam_ok = True
-        self.cb_camera.setToolTip(_("Select which camera to use for live mode"))
+            self._camera_names = []
+            self._camera_indices = []
+
+        self._camera_names.append("Local Video File...")
+        self._camera_indices.append("LOCAL_VIDEO")
+        cam_ok = True
+
+        self.cb_camera.addItems(self._camera_names)
+        self.cb_camera.setToolTip(_("Select which camera or video to use for live mode"))
         layout.addWidget(self.cb_camera, 1)
 
         self.btn_live = QPushButton(_("Live"))
@@ -914,9 +916,19 @@ class MainWindow(QMainWindow):
     def _on_live(self) -> None:
         idx = self.cb_camera.currentIndex()
         if idx < 0 or idx >= len(self._camera_indices):
-            update_status("No camera available")
+            update_status("No input available")
             return
         camera_index = self._camera_indices[idx]
+        
+        if camera_index == "LOCAL_VIDEO":
+            path, _filter = QFileDialog.getOpenFileName(
+                self, _("Select a video for live mode"),
+                "", "Videos (*.mp4 *.mkv *.avi *.mov)"
+            )
+            if not path:
+                return
+            camera_index = path
+
         if _LIVE_MAPPER is not None and _LIVE_MAPPER.isVisible():
             update_status("Source x Target Mapper is already open.")
             _LIVE_MAPPER.raise_()
@@ -1006,42 +1018,60 @@ class PreviewWindow(QWidget):
 
 
 class _CaptureWorker(QThread):
-    """Reads frames from the camera into a bounded queue. Drops on overflow."""
+    """Reads frames from the camera into a bounded queue. Drops on overflow for webcam, blocks for video files."""
 
-    def __init__(self, cap, capture_queue: queue.Queue, stop_event: threading.Event):
+    def __init__(self, cap, capture_queue: queue.Queue, stop_event: threading.Event, is_video_file: bool = False):
         super().__init__()
         self._cap = cap
         self._queue = capture_queue
         self._stop = stop_event
+        self._is_video_file = is_video_file
 
     def run(self) -> None:
         while not self._stop.is_set():
             ret, frame = self._cap.read()
             if not ret:
+                if self._is_video_file:
+                    # Wait for processing queue to drain before stopping
+                    while not self._queue.empty() and not self._stop.is_set():
+                        import time
+                        time.sleep(0.1)
+                    import time
+                    time.sleep(0.5)  # Let the last frame process
                 self._stop.set()
                 break
-            try:
-                self._queue.put_nowait(frame)
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
+            
+            if self._is_video_file:
+                while not self._stop.is_set():
+                    try:
+                        self._queue.put(frame, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+            else:
                 try:
                     self._queue.put_nowait(frame)
                 except queue.Full:
-                    pass
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._queue.put_nowait(frame)
+                    except queue.Full:
+                        pass
 
 
 class _ProcessingWorker(QThread):
     """Pulls raw frames, runs detect/swap/enhance, pushes processed frames."""
 
-    def __init__(self, capture_queue, processed_queue, stop_event, camera_fps: float):
+    def __init__(self, capture_queue, processed_queue, stop_event, camera_fps: float, video_writer=None):
         super().__init__()
         self._cq = capture_queue
         self._pq = processed_queue
         self._stop = stop_event
         self._fps = camera_fps
+        self._video_writer = video_writer
 
     def run(self) -> None:
         frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
@@ -1052,6 +1082,8 @@ class _ProcessingWorker(QThread):
         frame_count = 0
         fps = 0.0
         det_count = 0
+        self.total_processed_frames = 0
+        self.start_time = time.time()
         cached_target_face = None
         cached_many_faces = None
         det_interval = max(1, round(self._fps * 0.08))
@@ -1170,6 +1202,13 @@ class _ProcessingWorker(QThread):
                 except queue.Full:
                     pass
 
+            if self._video_writer is not None:
+                self._video_writer.write(temp_frame)
+                
+            self.total_processed_frames += 1
+            if self.total_processed_frames % 10 == 0:
+                print(f"[DLC.LIVE] Processed {self.total_processed_frames} frames...", flush=True)
+
 
 class WebcamPreviewWindow(QWidget):
     def __init__(self, camera_index: int):
@@ -1198,12 +1237,30 @@ class WebcamPreviewWindow(QWidget):
         self._capture_queue: queue.Queue = queue.Queue(maxsize=2)
         self._processed_queue: queue.Queue = queue.Queue(maxsize=2)
         self._stop_event = threading.Event()
+        
+        self._video_writer = None
+        if isinstance(camera_index, str):
+            out_path = "live_output.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            fps_val = camera_fps if camera_fps > 0 and camera_fps < 240 else 30.0
+            self._video_writer = cv2.VideoWriter(
+                out_path, fourcc, fps_val, 
+                (self._cap.actual_width, self._cap.actual_height)
+            )
+            if not self._video_writer.isOpened():
+                out_path = "live_output.avi"
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                self._video_writer = cv2.VideoWriter(
+                    out_path, fourcc, fps_val, 
+                    (self._cap.actual_width, self._cap.actual_height)
+                )
+            print(f"[DLC.LIVE] Saving live video output to {out_path}", flush=True)
 
         self._capture_worker = _CaptureWorker(
-            self._cap, self._capture_queue, self._stop_event
+            self._cap, self._capture_queue, self._stop_event, is_video_file=isinstance(camera_index, str)
         )
         self._processing_worker = _ProcessingWorker(
-            self._capture_queue, self._processed_queue, self._stop_event, camera_fps
+            self._capture_queue, self._processed_queue, self._stop_event, camera_fps, self._video_writer
         )
         self._capture_worker.start()
         self._processing_worker.start()
@@ -1248,6 +1305,20 @@ class WebcamPreviewWindow(QWidget):
         try:
             if hasattr(self, '_cap'):
                 self._cap.release()
+            if hasattr(self, '_video_writer') and self._video_writer:
+                self._video_writer.release()
+                
+                # Fetch stats from processing worker
+                total_frames = 0
+                total_time = 0.0
+                if hasattr(self, '_processing_worker'):
+                    total_frames = getattr(self._processing_worker, 'total_processed_frames', 0)
+                    start_time = getattr(self._processing_worker, 'start_time', time.time())
+                    total_time = time.time() - start_time
+                    
+                avg_fps = total_frames / total_time if total_time > 0 else 0.0
+                print("[DLC.LIVE] Video writer released and file saved.", flush=True)
+                print(f"[DLC.LIVE] Stats: {total_frames} frames processed in {total_time:.2f}s (Average processing speed: {avg_fps:.1f} fps)", flush=True)
         except Exception:
             pass
         global _WEBCAM_PREVIEW

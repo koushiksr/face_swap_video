@@ -1226,18 +1226,28 @@ class WebcamPreviewWindow(QWidget):
         self._image_label.setPixmap(_bgr_to_qpixmap(bgr_frame))
 
     def closeEvent(self, event) -> None:
-        self._stop_event.set()
+        if hasattr(self, '_stop_event'):
+            self._stop_event.set()
         try:
-            self._timer.stop()
+            if hasattr(self, '_timer'):
+                self._timer.stop()
         except Exception:
             pass
-        for worker in (self._capture_worker, self._processing_worker):
+        
+        workers = []
+        if hasattr(self, '_capture_worker'):
+            workers.append(self._capture_worker)
+        if hasattr(self, '_processing_worker'):
+            workers.append(self._processing_worker)
+            
+        for worker in workers:
             try:
                 worker.wait(2000)
             except Exception:
                 pass
         try:
-            self._cap.release()
+            if hasattr(self, '_cap'):
+                self._cap.release()
         except Exception:
             pass
         global _WEBCAM_PREVIEW
